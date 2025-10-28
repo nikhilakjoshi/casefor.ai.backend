@@ -1,0 +1,16 @@
+fastapi
+uvicorn[standard]
+python-multipart
+python-dotenv
+llama-index
+llama-index-embeddings-gemini
+llama-index-vector-stores-pinecone
+llama-index-readers-file
+pinecone-client
+google-generativeai
+unstructured[all-docs]
+pypdf
+docx2txt
+openpyxl
+markdown
+boto3
