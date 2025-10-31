@@ -1,9 +1,10 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, Query
+from fastapi import FastAPI, File, UploadFile, HTTPException, Query, Form
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 import tempfile
 import os
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 import logging
 from datetime import datetime
 
@@ -29,7 +30,12 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Validate required environment variables
-required_env_vars = ["PINECONE_API_KEY", "GOOGLE_API_KEY", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]
+required_env_vars = [
+    "PINECONE_API_KEY",
+    "GOOGLE_API_KEY",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+]
 for var in required_env_vars:
     if not os.getenv(var):
         raise ValueError(f"Missing required environment variable: {var}")
@@ -87,12 +93,14 @@ index = VectorStoreIndex.from_vector_store(vector_store)
 # Initialize S3 client
 try:
     s3_client = boto3.client(
-        's3',
+        "s3",
         aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
         aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-        region_name=os.getenv("AWS_REGION", "us-east-1")  # Default to us-east-1 if not specified
+        region_name=os.getenv(
+            "AWS_REGION", "us-east-1"
+        ),  # Default to us-east-1 if not specified
     )
-    
+
     # Test S3 connection
     s3_client.list_buckets()
     logger.info("✅ S3 client initialized successfully")
@@ -103,6 +111,7 @@ except Exception as e:
 # S3 bucket name - using the exact env var from .env file
 S3_BUCKET_NAME = os.getenv("AWS_S3_BUCKET_NAME", "caseforai-bucket")
 
+
 def upload_file_to_s3(file_content: bytes, filename: str, content_type: str) -> str:
     """Upload file to S3 and return the URL"""
     try:
@@ -111,7 +120,7 @@ def upload_file_to_s3(file_content: bytes, filename: str, content_type: str) -> 
         unique_id = str(uuid.uuid4())[:8]
         file_extension = Path(filename).suffix
         s3_key = f"documents/{timestamp}/{unique_id}_{filename}"
-        
+
         # Upload file to S3
         s3_client.put_object(
             Bucket=S3_BUCKET_NAME,
@@ -119,20 +128,21 @@ def upload_file_to_s3(file_content: bytes, filename: str, content_type: str) -> 
             Body=file_content,
             ContentType=content_type,
             Metadata={
-                'original_filename': filename,
-                'upload_timestamp': datetime.now().isoformat()
-            }
+                "original_filename": filename,
+                "upload_timestamp": datetime.now().isoformat(),
+            },
         )
-        
+
         # Generate URL for the uploaded file
         s3_url = f"https://{S3_BUCKET_NAME}.s3.amazonaws.com/{s3_key}"
-        
+
         logger.info(f"File uploaded to S3: {s3_url}")
         return s3_url
-        
+
     except ClientError as e:
         logger.error(f"Failed to upload file to S3: {str(e)}")
         raise e
+
 
 # File readers for different formats
 readers = {
@@ -142,6 +152,24 @@ readers = {
     ".md": MarkdownReader(),
     ".xlsx": UnstructuredReader(),
 }
+
+
+# Pydantic models
+class DocumentResponse(BaseModel):
+    filename: str
+    content: str
+    case_id: str
+    case_document_id: Optional[str]
+    chunk_count: int
+    upload_timestamp: str
+
+
+class DocumentsResponse(BaseModel):
+    case_id: str
+    case_document_id: Optional[str]
+    documents: List[DocumentResponse]
+    total_documents: int
+    markdown_content: str
 
 
 @app.get("/")
@@ -155,7 +183,11 @@ async def health_check():
 
 
 @app.post("/upload")
-async def upload_file(file: UploadFile = File(...)):
+async def upload_file(
+    file: UploadFile = File(...),
+    case_id: str = Form(...),
+    case_document_id: Optional[str] = Form(None),
+):
     try:
         # Validate file type
         file_extension = Path(file.filename).suffix.lower()
@@ -183,6 +215,9 @@ async def upload_file(file: UploadFile = File(...)):
                 doc.metadata["filename"] = file.filename
                 doc.metadata["file_type"] = file_extension
                 doc.metadata["upload_timestamp"] = datetime.now().isoformat()
+                doc.metadata["case_id"] = case_id
+                if case_document_id:
+                    doc.metadata["case_document_id"] = case_document_id
 
             # Parse documents into nodes/chunks
             nodes = node_parser.get_nodes_from_documents(documents)
@@ -199,29 +234,39 @@ async def upload_file(file: UploadFile = File(...)):
             logger.info(
                 f"Successfully processed and stored {len(documents)} documents from {file.filename}"
             )
-            
+
             # Upload file to S3 after successful Pinecone processing
             s3_url = None
             s3_error = None
             try:
-                s3_url = upload_file_to_s3(content, file.filename, file.content_type or "application/octet-stream")
+                s3_url = upload_file_to_s3(
+                    content,
+                    file.filename,
+                    file.content_type or "application/octet-stream",
+                )
                 logger.info(f"File successfully uploaded to S3: {s3_url}")
             except Exception as s3_e:
                 s3_error = str(s3_e)
-                logger.error(f"S3 upload failed, but Pinecone processing succeeded: {s3_error}")
+                logger.error(
+                    f"S3 upload failed, but Pinecone processing succeeded: {s3_error}"
+                )
 
             response_content = {
                 "message": "File uploaded and processed successfully",
                 "filename": file.filename,
+                "case_id": case_id,
+                "case_document_id": case_document_id,
                 "documents_processed": len(documents),
                 "chunks_created": len(nodes),
                 "file_type": file_extension,
                 "s3_url": s3_url,
             }
-            
+
             # Add warning if S3 upload failed
             if s3_error:
-                response_content["warning"] = f"Document processed successfully but S3 upload failed: {s3_error}"
+                response_content["warning"] = (
+                    f"Document processed successfully but S3 upload failed: {s3_error}"
+                )
                 response_content["s3_error"] = s3_error
 
             return JSONResponse(
@@ -236,6 +281,114 @@ async def upload_file(file: UploadFile = File(...)):
     except Exception as e:
         logger.error(f"Error processing file {file.filename}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
+
+
+@app.get("/documents", response_model=DocumentsResponse)
+async def get_documents(
+    case_id: str = Query(..., description="Case ID to filter documents"),
+    case_document_id: Optional[str] = Query(
+        None, description="Optional case document ID for more specific filtering"
+    ),
+):
+    """Retrieve and concatenate documents by case ID or case document ID"""
+    try:
+        # Build filter for Pinecone query
+        filter_dict = {"case_id": {"$eq": case_id}}
+        if case_document_id:
+            filter_dict["case_document_id"] = {"$eq": case_document_id}
+
+        # Query all chunks matching the filter
+        # Since we want all chunks, we use a broad query with high limit
+        retriever = index.as_retriever(
+            similarity_top_k=10000
+        )  # Large number to get all chunks
+
+        # Get all chunks using a generic query (we'll filter by metadata)
+        # query_engine = index.as_query_engine(
+        #     similarity_top_k=10000,
+        #     response_mode="no_text",
+        #     filters=filter_dict
+        # )
+
+        # Use vector store directly for metadata filtering
+        # Get embedding dimension from test embedding
+        test_embedding = embed_model.get_text_embedding("test")
+        embedding_dim = len(test_embedding)
+
+        vector_results = pinecone_index.query(
+            vector=[0.0] * embedding_dim,  # Dummy vector with correct dimension
+            filter=filter_dict,
+            top_k=10000,
+            include_metadata=True,
+        )
+
+        if not vector_results.matches:
+            return DocumentsResponse(
+                case_id=case_id,
+                case_document_id=case_document_id,
+                documents=[],
+                total_documents=0,
+                markdown_content="# No documents found\n\nNo documents found for the specified case ID.",
+            )
+
+        # Group chunks by filename
+        documents_by_filename = {}
+        for match in vector_results.matches:
+            metadata = match.metadata
+            filename = metadata.get("filename", "Unknown")
+
+            if filename not in documents_by_filename:
+                documents_by_filename[filename] = {"chunks": [], "metadata": metadata}
+
+            # Text content should be in the metadata under '_node_content' or similar
+            # LlamaIndex typically stores the text content in metadata
+            text_content = metadata.get("_node_content", metadata.get("text", ""))
+
+            documents_by_filename[filename]["chunks"].append(
+                {"text": text_content, "score": match.score, "id": match.id}
+            )
+
+        # Build response documents
+        response_documents = []
+        markdown_sections = []
+
+        for filename, doc_data in documents_by_filename.items():
+            # Sort chunks by ID to maintain original document order
+            sorted_chunks = sorted(doc_data["chunks"], key=lambda x: x.get("id", ""))
+            content = "\n\n".join(
+                [chunk["text"] for chunk in sorted_chunks if chunk["text"]]
+            )
+
+            metadata = doc_data["metadata"]
+            doc_response = DocumentResponse(
+                filename=filename,
+                content=content,
+                case_id=metadata.get("case_id", case_id),
+                case_document_id=metadata.get("case_document_id"),
+                chunk_count=len(sorted_chunks),
+                upload_timestamp=metadata.get("upload_timestamp", "Unknown"),
+            )
+            response_documents.append(doc_response)
+
+            # Create markdown section
+            markdown_sections.append(f"# {filename}\n\n{content}")
+
+        # Combine all markdown sections
+        markdown_content = "\n\n---\n\n".join(markdown_sections)
+
+        return DocumentsResponse(
+            case_id=case_id,
+            case_document_id=case_document_id,
+            documents=response_documents,
+            total_documents=len(response_documents),
+            markdown_content=markdown_content,
+        )
+
+    except Exception as e:
+        logger.error(f"Error retrieving documents: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error retrieving documents: {str(e)}"
+        )
 
 
 @app.get("/query")
