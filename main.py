@@ -112,14 +112,23 @@ except Exception as e:
 S3_BUCKET_NAME = os.getenv("AWS_S3_BUCKET_NAME", "caseforai-bucket")
 
 
-def upload_file_to_s3(file_content: bytes, filename: str, content_type: str) -> str:
+def upload_file_to_s3(file_content: bytes, filename: str, content_type: str, case_id: str, case_document_id: str = None) -> str:
     """Upload file to S3 and return the URL"""
     try:
-        # Generate unique key with timestamp and UUID
+        # Generate unique key with case_id, timestamp and UUID
         timestamp = datetime.now().strftime("%Y/%m/%d")
         unique_id = str(uuid.uuid4())[:8]
         file_extension = Path(filename).suffix
-        s3_key = f"documents/{timestamp}/{unique_id}_{filename}"
+        s3_key = f"documents/{case_id}/{timestamp}/{unique_id}_{filename}"
+
+        # Prepare metadata
+        metadata = {
+            "original_filename": filename,
+            "upload_timestamp": datetime.now().isoformat(),
+            "case_id": case_id,
+        }
+        if case_document_id:
+            metadata["case_document_id"] = case_document_id
 
         # Upload file to S3
         s3_client.put_object(
@@ -127,10 +136,7 @@ def upload_file_to_s3(file_content: bytes, filename: str, content_type: str) -> 
             Key=s3_key,
             Body=file_content,
             ContentType=content_type,
-            Metadata={
-                "original_filename": filename,
-                "upload_timestamp": datetime.now().isoformat(),
-            },
+            Metadata=metadata,
         )
 
         # Generate URL for the uploaded file
@@ -243,6 +249,8 @@ async def upload_file(
                     content,
                     file.filename,
                     file.content_type or "application/octet-stream",
+                    case_id,
+                    case_document_id,
                 )
                 logger.info(f"File successfully uploaded to S3: {s3_url}")
             except Exception as s3_e:
