@@ -112,7 +112,13 @@ except Exception as e:
 S3_BUCKET_NAME = os.getenv("AWS_S3_BUCKET_NAME", "caseforai-bucket")
 
 
-def upload_file_to_s3(file_content: bytes, filename: str, content_type: str, case_id: str, case_document_id: str = None) -> str:
+def upload_file_to_s3(
+    file_content: bytes,
+    filename: str,
+    content_type: str,
+    case_id: str,
+    case_document_id: str = None,
+) -> str:
     """Upload file to S3 and return the URL"""
     try:
         # Generate unique key with case_id, timestamp and UUID
@@ -308,8 +314,10 @@ async def get_documents(
         # Query all chunks matching the filter
         # Since we want all chunks, we use a broad query with high limit
         retriever = index.as_retriever(
-            similarity_top_k=10000
+            similarity_top_k=100000
         )  # Large number to get all chunks
+
+        retriever.retrieve("dsdfs")
 
         # Get all chunks using a generic query (we'll filter by metadata)
         # query_engine = index.as_query_engine(
